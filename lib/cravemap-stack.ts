@@ -1,4 +1,6 @@
 import * as cdk from 'aws-cdk-lib/core';
+import * as apigw from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigwint from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -35,7 +37,15 @@ export class CravemapStack extends cdk.Stack {
       iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonBedrockMantleInferenceAccess'),
     );
 
-    const agentUrl = agent.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+    // El stage se llama "api" para que absorba el prefijo del path: CloudFront reenvia
+    // /api/craving tal cual y API Gateway lo lee como stage=api + ruta /craving.
+    const api = new apigw.HttpApi(this, 'AgentApi', { createDefaultStage: false });
+    api.addRoutes({
+      path: '/craving',
+      methods: [apigw.HttpMethod.POST],
+      integration: new apigwint.HttpLambdaIntegration('AgentIntegration', agent),
+    });
+    const stage = new apigw.HttpStage(this, 'ApiStage', { httpApi: api, stageName: 'api', autoDeploy: true });
 
     const siteBucket = new s3.Bucket(this, 'SiteBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -52,17 +62,16 @@ export class CravemapStack extends cdk.Stack {
       },
       additionalBehaviors: {
         '/api/*': {
-          origin: origins.FunctionUrlOrigin.withOriginAccessControl(agentUrl),
+          origin: new origins.HttpOrigin(`${api.apiId}.execute-api.${this.region}.amazonaws.com`),
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          // Host no: execute-api exige su propio Host para resolver el stage.
+          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         },
       },
-      errorResponses: [403, 404].map((httpStatus) => ({
-        httpStatus,
-        responseHttpStatus: 200,
-        responsePagePath: '/index.html',
-      })),
+      // Sin errorResponses: son a nivel distribucion y enmascaraban los errores de /api/*
+      // como index.html con 200. El front es un solo archivo, no necesita rewrite de rutas.
     });
 
     new s3deploy.BucketDeployment(this, 'SiteDeployment', {
@@ -76,6 +85,7 @@ export class CravemapStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SiteBucketName', { value: siteBucket.bucketName });
     new cdk.CfnOutput(this, 'DistributionId', { value: distribution.distributionId });
     new cdk.CfnOutput(this, 'SiteUrl', { value: `https://${distribution.domainName}` });
+    new cdk.CfnOutput(this, 'ApiUrl', { value: stage.url });
     new cdk.CfnOutput(this, 'AgentFunctionName', { value: agent.functionName });
   }
 }
