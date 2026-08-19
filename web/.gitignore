@@ -1,0 +1,6 @@
+node_modules
+dist
+
+# el .gitignore raiz ignora *.js (salida de tsc). Aca los .js son fuente.
+!*.js
+!src/*.js
