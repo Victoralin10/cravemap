@@ -1,5 +1,4 @@
 import json, os, boto3
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands import Agent, tool
 from strands.models.openai import OpenAIModel
 
@@ -55,16 +54,12 @@ def pick_ids(text, valid, n=3):
     return out[:n]
 
 
-app = BedrockAgentCoreApp()
-
-
-@app.entrypoint
-def invoke(payload):
-    craving = (payload or {}).get("craving", "").strip()
+def handler(event, _ctx):
+    craving = json.loads(event.get("body") or "{}").get("craving", "").strip()
     if not craving:
-        return {"error": "falta 'craving'"}
+        return _json(400, {"error": "falta 'craving'"})
     if len(craving) > 300:
-        return {"error": "antojo demasiado largo"}
+        return _json(400, {"error": "antojo demasiado largo"})
 
     agent = Agent(
         model=OpenAIModel(
@@ -81,8 +76,12 @@ def invoke(payload):
     except Exception as e:
         print(f"agente fallo: {e}")
         ids = []
-    return {"craving": craving, "dishes": [by_id[i] for i in ids] or _dishes()[:3]}
+    return _json(200, {"craving": craving, "dishes": [by_id[i] for i in ids] or _dishes()[:3]})
 
 
-if __name__ == "__main__":
-    app.run()
+def _json(code, payload):
+    return {
+        "statusCode": code,
+        "headers": {"content-type": "application/json; charset=utf-8"},
+        "body": json.dumps(payload, ensure_ascii=False),
+    }

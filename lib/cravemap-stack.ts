@@ -1,7 +1,5 @@
 import * as cdk from 'aws-cdk-lib/core';
-import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
-import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
@@ -22,31 +20,22 @@ export class CravemapStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // El agente Strands corre en AgentCore Runtime: contenedor ARM64, HTTP en :8080.
-    const agent = new agentcore.Runtime(this, 'Agent', {
-      runtimeName: 'cravemap_agent',
-      agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromAsset('agent', {
-        platform: ecrAssets.Platform.LINUX_ARM64,
-      }),
-      environmentVariables: { TABLE_NAME: this.dishesTable.tableName },
+    // El agente Strands vive en un Lambda de contenedor: AgentCore Runtime tiene
+    // cuota 0 en esta cuenta (Total Agents per Account = 0), y Strands es solo una libreria.
+    const agent = new lambda.DockerImageFunction(this, 'Agent', {
+      code: lambda.DockerImageCode.fromImageAsset('agent'),
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(60),
+      environment: { TABLE_NAME: this.dishesTable.tableName, MODEL_ID: 'google.gemma-4-31b' },
     });
-    this.dishesTable.grantReadData(agent.role);
+    this.dishesTable.grantReadData(agent);
     // bedrock-mantle:CreateInference + CallWithBearerToken; Strands autentica con bearer acunado.
-    agent.role.addManagedPolicy(
+    agent.role!.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonBedrockMantleInferenceAccess'),
     );
 
-    // El navegador no puede firmar SigV4, asi que este proxy es quien invoca al runtime.
-    const proxy = new lambda.Function(this, 'Proxy', {
-      runtime: lambda.Runtime.PYTHON_3_13,
-      handler: 'proxy.handler',
-      code: lambda.Code.fromAsset('lambda'),
-      timeout: cdk.Duration.seconds(60),
-      environment: { AGENT_RUNTIME_ARN: agent.agentRuntimeArn },
-    });
-    agent.grantInvoke(proxy);
-
-    const proxyUrl = proxy.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+    const agentUrl = agent.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
 
     const siteBucket = new s3.Bucket(this, 'SiteBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -63,7 +52,7 @@ export class CravemapStack extends cdk.Stack {
       },
       additionalBehaviors: {
         '/api/*': {
-          origin: origins.FunctionUrlOrigin.withOriginAccessControl(proxyUrl),
+          origin: origins.FunctionUrlOrigin.withOriginAccessControl(agentUrl),
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -87,6 +76,6 @@ export class CravemapStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SiteBucketName', { value: siteBucket.bucketName });
     new cdk.CfnOutput(this, 'DistributionId', { value: distribution.distributionId });
     new cdk.CfnOutput(this, 'SiteUrl', { value: `https://${distribution.domainName}` });
-    new cdk.CfnOutput(this, 'AgentRuntimeArn', { value: agent.agentRuntimeArn });
+    new cdk.CfnOutput(this, 'AgentFunctionName', { value: agent.functionName });
   }
 }

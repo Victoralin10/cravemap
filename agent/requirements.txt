@@ -1,3 +1,2 @@
 strands-agents[openai]
-bedrock-agentcore
 boto3
