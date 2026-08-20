@@ -5,17 +5,29 @@ from decimal import Decimal
 os.environ.setdefault("AWS_REGION", "us-east-1")
 os.environ.setdefault("TABLE_NAME", "dummy")
 
+# Lo que haria el modelo en una invocacion: recibe las tools, devuelve el texto de respuesta.
+guion = [lambda tools: ""]
+
+
+class AgentFalso:
+    def __init__(self, **kw):
+        self.kw = kw
+
+    def __call__(self, _prompt):
+        return guion[0](self.kw["tools"])
+
+
 # strands vive en el venv; para probar la logica pura basta un doble de 3 lineas.
 for nombre, attrs in (
-    ("strands", {"Agent": object, "tool": lambda f: f}),
+    ("strands", {"Agent": AgentFalso, "tool": lambda f: f}),
     ("strands.models", {}),
-    ("strands.models.openai", {"OpenAIModel": object}),
+    ("strands.models.openai", {"OpenAIModel": lambda **kw: kw}),
 ):
     sys.modules.setdefault(nombre, types.ModuleType(nombre)).__dict__.update(attrs)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import agent
-from agent import pick_ids
+import brujula, locales
+from brujula import pick_ids
 from boto3.dynamodb.conditions import Key
 
 # --- pick_ids: claves plato#local, un local por plato -------------------------
@@ -50,34 +62,48 @@ def item(local, precio):
             "precio": Decimal(str(precio)), "lat": Decimal("-12.1"), "lng": Decimal("-77.0")}
 
 
-agent.table = TablaFalsa([item("Miraflores#node/1", 40), item("Barranco#node/2", 20)])
-out = agent.buscar_locales("ceviche")
-assert agent.table.kw["KeyConditionExpression"] == Key("plato").eq("ceviche"), "query por plato"
-assert agent.table.kw["Limit"] == 60
+locales.table = TablaFalsa([item("Miraflores#node/1", 40), item("Barranco#node/2", 20)])
+out = locales.buscar_locales("ceviche")
+assert locales.table.kw["KeyConditionExpression"] == Key("plato").eq("ceviche"), "query por plato"
+assert locales.table.kw["Limit"] == 60
 assert out.splitlines()[0] == "Miraflores#node/1 | Punto | S/40 | Miraflores"
 
-agent.buscar_locales("ceviche", distrito="Barranco")
-assert agent.table.kw["KeyConditionExpression"] == (
+locales.buscar_locales("ceviche", distrito="Barranco")
+assert locales.table.kw["KeyConditionExpression"] == (
     Key("plato").eq("ceviche") & Key("local").begins_with("Barranco#")
 ), "el distrito va como begins_with en la sort key"
 
-out = agent.buscar_locales("ceviche", precio_max=25)
-assert "KeyConditionExpression" in agent.table.kw and "FilterExpression" not in agent.table.kw, \
+out = locales.buscar_locales("ceviche", precio_max=25)
+assert "KeyConditionExpression" in locales.table.kw and "FilterExpression" not in locales.table.kw, \
     "el precio NO va en la query: Dynamo aplica Limit antes del filtro"
 assert out.splitlines() == ["Barranco#node/2 | Punto | S/20 | Barranco"], "filtra precio en Python"
 
-agent.table = TablaFalsa([])
-assert "Sin locales" in agent.buscar_locales("ceviche"), "avisa cuando no hay nada"
+locales.table = TablaFalsa([])
+assert "Sin locales" in locales.buscar_locales("ceviche"), "avisa cuando no hay nada"
 
 # --- lo que ven las tools se puede reconstruir para la respuesta HTTP ---------
-d = agent._dish(agent._vistos["ceviche#Barranco#node/2"])
+d = locales.dish(locales.vistos["ceviche#Barranco#node/2"])
 assert d["id"] == "ceviche#Barranco#node/2" and d["precio"] == 20.0 and isinstance(d["lat"], float)
-print("ok")
 
 # Los locales respaldados por OSM salen antes que los inferidos.
-agent.table = TablaFalsa([
+locales.table = TablaFalsa([
     {**item("Surco#node/9", 30), "cuisine_fuente": "inferido"},
     {**item("Lince#node/8", 30), "cuisine_fuente": "osm"},
 ])
-assert agent.buscar_locales("ceviche").splitlines()[0].startswith("Lince#node/8"), \
+assert locales.buscar_locales("ceviche").splitlines()[0].startswith("Lince#node/8"), \
     "primero lo que OSM respalda"
+
+# --- elegir: usa lo que la tool devolvio en ESTA invocacion, y nada mas -------
+locales.table = TablaFalsa([item("Barranco#node/2", 20)])
+guion[0] = lambda tools: (tools[0]("ceviche"), "ceviche#Barranco#node/2")[1]
+assert [x["id"] for x in brujula.elegir("ceviche")] == ["ceviche#Barranco#node/2"]
+
+# El modelo repite la clave pero nadie llamo la tool: no debe heredarla de la corrida anterior.
+guion[0] = lambda tools: "ceviche#Barranco#node/2"
+dishes = brujula.elegir("otra cosa")
+assert locales.vistos == {}, "vistos se limpia al entrar a elegir"
+assert len(dishes) == 3, "sin ids validos cae al fallback (3 platos del catalogo)"
+
+guion[0] = lambda tools: 1 / 0
+assert len(brujula.elegir("boom")) == 3, "si el agente revienta, fallback"
+print("ok")

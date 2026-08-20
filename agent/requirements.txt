@@ -1,2 +1,2 @@
 strands-agents[openai]
-boto3
+# boto3 no va: el runtime de Lambda ya lo trae.
