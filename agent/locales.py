@@ -24,9 +24,13 @@ def buscar_locales(plato: str, distrito: str = "", precio_max: float = 0) -> str
     if distrito:
         cond = cond & Key("local").begins_with(distrito + "#")
     items = table.query(KeyConditionExpression=cond, Limit=60)["Items"]
-    # El precio se filtra aca, en Python, a proposito: Dynamo aplica Limit ANTES de
-    # FilterExpression, asi que moverlo a la query devolveria casi nada. No lo "arregles".
-    cabe = [i for i in items if not precio_max or float(i["precio"]) <= precio_max]
+    # El precio y el flag oculto se filtran aca, en Python, a proposito: Dynamo aplica
+    # Limit ANTES de FilterExpression, asi que moverlo a la query devolveria casi nada.
+    # No lo "arregles". oculto=true lo pone el curador nocturno (curador.py).
+    cabe = [
+        i for i in items
+        if not i.get("oculto") and (not precio_max or float(i["precio"]) <= precio_max)
+    ]
     # Primero los locales donde OSM dice que sirven esa cocina; los inferidos (la carta
     # generica de un restaurante sin tag cuisine) son relleno, no la primera opcion.
     hits = sorted(cabe, key=lambda i: i.get("cuisine_fuente") != "osm")[:8]
@@ -54,8 +58,6 @@ def fallback():
     Con PK/SK ya no hay scan barato, y devolver platos reales gana a devolver vacio."""
     out = []
     for p in PLATOS[:3]:
-        out += [
-            dish(i)
-            for i in table.query(KeyConditionExpression=Key("plato").eq(p["id"]), Limit=1)["Items"]
-        ]
+        items = table.query(KeyConditionExpression=Key("plato").eq(p["id"]), Limit=5)["Items"]
+        out += [dish(i) for i in items if not i.get("oculto")][:1]
     return out

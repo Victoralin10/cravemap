@@ -1,3 +1,5 @@
+import Feedback from './Feedback.jsx'
+
 export function soles(p) {
   const n = Number(p)
   return Number.isFinite(n) && p != null && p !== '' ? 'S/ ' + (n % 1 ? n.toFixed(2) : n) : 'S/ —'
@@ -35,6 +37,8 @@ export default function DishCard({ dish, rank }) {
           Ver en el mapa<span aria-hidden="true"> ↗</span>
         </a>
       )}
+
+      <Feedback dish={dish} />
     </li>
   )
 }

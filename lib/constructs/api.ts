@@ -5,6 +5,7 @@ import { Construct } from 'constructs';
 
 export interface ApiProps {
   fn: lambda.IFunction;
+  feedbackFn: lambda.IFunction;
 }
 
 export class Api extends Construct {
@@ -23,7 +24,19 @@ export class Api extends Construct {
       methods: [apigw.HttpMethod.POST],
       integration: new apigwint.HttpLambdaIntegration('AgentIntegration', props.fn),
     });
-    this.stage = new apigw.HttpStage(this, 'Stage', { httpApi: api, stageName: 'api', autoDeploy: true });
+    api.addRoutes({
+      path: '/feedback',
+      methods: [apigw.HttpMethod.POST],
+      integration: new apigwint.HttpLambdaIntegration('FeedbackIntegration', props.feedbackFn),
+    });
+    this.stage = new apigw.HttpStage(this, 'Stage', {
+      httpApi: api,
+      stageName: 'api',
+      autoDeploy: true,
+      // /feedback es escritura publica y sin auth: el techo esta para que una tarde
+      // tonta (o un bucle de alguien) no se convierta en factura.
+      throttle: { rateLimit: 20, burstLimit: 40 },
+    });
 
     this.apiId = api.apiId;
     this.url = this.stage.url;
