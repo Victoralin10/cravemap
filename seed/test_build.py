@@ -1,5 +1,6 @@
 """Check minimo: python3 seed/test_build.py"""
-from build_dishes import en_poligono, precio, platos, limpio
+import json, pathlib
+from build_dishes import en_poligono, precio, platos, limpio, clave
 
 # --- ray casting punto-en-poligono ---
 # cuadrado (0,0)-(10,10) con las aristas DESORDENADAS: el algoritmo no depende del orden
@@ -47,7 +48,25 @@ tabla = """{| class="wikitable sortable"
 |}"""
 p = platos(tabla)
 assert p["ceviche"][0] == "Ceviche", "resuelve [[destino|texto]] y quita tildes"
-assert p["ceviche"][1] == ["entrada fria", "pescado fresco crudo", "limon", "cebolla roja"]
-assert p["arroz chaufa"][1] == ["plato de fondo", "sillao"], "el tipo sin parentesis, la prosa larga fuera"
+assert p["ceviche"][1] == "Entrada fria", "el tipo, sin tildes"
+assert p["ceviche"][2] == ["pescado", "limon", "cebolla"], "solo el sustantivo cabeza"
+assert p["arroz chaufa"][1] == "Plato de fondo", "el tipo sin parentesis"
+assert p["arroz chaufa"][2] == ["sillao"], "la prosa larga fuera"
 assert limpio("Breña Ñaña") == "Brena Nana"
+assert clave("Aji de gallina") == "aji-de-gallina" and clave("Cau cau") == "cau-cau"
+
+# --- contrato de las dos tablas generadas ---
+d = pathlib.Path(__file__).parent
+catalogo = json.loads((d / "platos.json").read_text())
+locales = json.loads((d / "locales.json").read_text())
+ids = {c["id"] for c in catalogo}
+assert ids and len(ids) == len(catalogo), "un item por plato, ids unicos"
+vistos = set()
+for l in locales:
+    assert l["plato"] in ids, f"plato sin catalogo: {l['plato']}"
+    assert l["local"] == f"{l['distrito']}#{l['osm_id']}", "sort key = distrito#osm_id"
+    par = (l["plato"], l["local"])
+    assert par not in vistos, f"par duplicado: {par}"
+    vistos.add(par)
+assert {l["plato"] for l in locales} == ids, "todo plato del catalogo tiene al menos un local"
 print("ok")

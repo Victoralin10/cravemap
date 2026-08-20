@@ -1,22 +1,52 @@
-# Fuentes de seed/dishes.json
+# Fuentes de seed/platos.json y seed/locales.json
 
-Todo el catalogo lo genera `python3 seed/build_dishes.py` (solo stdlib). Nada esta
-escrito a mano: si una fuente se cae, el script para y no rellena con datos inventados.
+Todo lo genera `python3 seed/build_dishes.py` (solo stdlib, una sola query a
+Overpass). Nada esta escrito a mano: si una fuente se cae, el script para tras 2
+intentos y no rellena con datos inventados.
+
+## Modelo de dos niveles
+
+| Archivo | Que es | Donde vive | Tamano |
+|---|---|---|---|
+| `platos.json` | Catalogo: 32 platos con `id`, `nombre`, `tipo`, `tags`. Solo platos que tienen al menos un local. | Empaquetado en la imagen del Lambda, **no** va a DynamoDB. | 3.9 KB |
+| `locales.json` | Los 35.259 pares plato-local, sin tope. | DynamoDB, via `python3 seed/seed.py <NombreTabla>`. | 11.4 MB |
+
+Claves de DynamoDB: partition key `plato` (= el `id` del catalogo), sort key
+`local` con el formato exacto `"{distrito}#{osm_id}"`. Los `tags` de cada par son
+los del plato, duplicados ahi para que la UI no tenga que hacer un join.
+
+El tope de 180 items que habia antes existia porque la tool del agente hacia scan
+completo y metia una linea por plato en el prompt del LLM. Con el catalogo aparte,
+la tool ya no necesita volcar la tabla al prompt y el tope desaparece.
 
 ## Que aporta cada fuente
 
 | Campo | Fuente |
 |---|---|
-| `nombre`, `tags` | Wikipedia ES, [Anexo:Platos tipicos del Peru](https://es.wikipedia.org/wiki/Anexo:Platos_t%C3%ADpicos_del_Per%C3%BA) via `action=parse&prop=wikitext`. Los tags salen de las columnas *Tipo* e *Ingredientes*. |
+| `nombre`, `tipo`, `tags` | Wikipedia ES, [Anexo:Platos tipicos del Peru](https://es.wikipedia.org/wiki/Anexo:Platos_t%C3%ADpicos_del_Per%C3%BA) via `action=parse&prop=wikitext`. `tipo` es la columna *Tipo*; los `tags` son la banda del plato mas el sustantivo cabeza de cada ingrediente corto de la columna *Ingredientes* (maximo 5, los que sirven para matchear un antojo). |
 | `lugar`, `lat`, `lng`, `osm_id` | OpenStreetMap, una sola query a Overpass: `amenity=restaurant\|fast_food\|cafe` con `name` dentro de la provincia de Lima (`admin_level=6`, `pe:ubigeo=1501`). |
 | `distrito` | OpenStreetMap: los 43 poligonos `admin_level=8` de la misma query, con join espacial punto-en-poligono (ray casting, sin dependencias). Fallback a `addr:city`; si tampoco cae en un distrito conocido, el local se descarta. |
 | `precio` | **Estimado.** Ver abajo. |
+| `cuisine_fuente` | `"osm"` o `"inferido"`. Ver abajo. |
 
-Emparejamiento plato-local: por el tag `cuisine` de OSM (`seafood`/`fish` -> marinos,
-`chicken` -> pollo a la brasa y afines, `chifa`/`chinese` -> chaufa, `peruvian`/`regional`
--> criollos, cafes -> postres). Un local aporta 1-3 platos segun cuanta metadata tenga
-(`website`, `phone`, `opening_hours`). El catalogo se corta en 180 items porque
-`buscar_platos` mete una linea por plato en el prompt del LLM.
+## El emparejamiento plato-local, y donde deja de ser un dato
+
+**`cuisine_fuente: "osm"`** (8.563 pares). El tag `cuisine` de OSM dice que cocina
+es: `seafood`/`fish` -> marinos, `chicken` -> pollo a la brasa y afines,
+`chifa`/`chinese` -> chaufa, `peruvian`/`regional`/`criollo` -> criollos,
+`coffee_shop`/`cafe`/`dessert`/`ice_cream` -> postres. El local se empareja con
+todos los platos de esa banda.
+
+**`cuisine_fuente: "inferido"`** (26.696 pares). **Esto es una inferencia nuestra,
+no un dato de OpenStreetMap.** Mas de la mitad de los locales de Lima no tienen el
+tag `cuisine`. A los que son `amenity=restaurant` les colgamos una carta generica
+de criollos comunes (lomo saltado, aji de gallina, arroz chaufa, pollo a la brasa,
+causa a la limena, papa a la huancaina, arroz con pollo, tacutacu), porque en Lima
+el restaurante sin etiquetar es casi siempre un menu criollo. Puede fallar en
+casos concretos: un local marcado asi puede no servir ese plato. Los `cafe` y
+`fast_food` sin `cuisine` **si** se descartan: no hay base para adivinar que sirven.
+
+Resultado: 4.705 locales unicos en los 43 distritos de la provincia de Lima.
 
 ## El precio es una estimacion
 

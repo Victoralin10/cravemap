@@ -1,8 +1,12 @@
-"""Genera seed/dishes.json desde fuentes publicas. Uso: python3 seed/build_dishes.py
+"""Genera seed/platos.json y seed/locales.json desde fuentes publicas.
+Uso: python3 seed/build_dishes.py
 
 Platos  -> Wikipedia ES "Anexo:Platos tipicos del Peru" (CC BY-SA 4.0).
 Locales -> OpenStreetMap via Overpass, provincia de Lima (ODbL).
 Precio  -> estimado con la heuristica de precio() (no hay fuente publica).
+
+Dos niveles: platos.json es el catalogo (pequeno, va empaquetado en la imagen del
+Lambda) y locales.json son todos los pares plato-local (van a DynamoDB).
 Detalle en seed/FUENTES.md. Solo stdlib.
 """
 import json, pathlib, re, unicodedata, urllib.request
@@ -21,15 +25,6 @@ out center tags;
 rel["boundary"="administrative"]["admin_level"="8"](area.lima);
 out geom;
 """
-
-# ponytail: el techo de 180 es el tamano del prompt, no la base de datos.
-# buscar_platos() en agent/agent.py hace scan completo y mete UNA LINEA POR PLATO
-# en el prompt del LLM: con miles de items el prompt explota en costo y latencia.
-# Para pasar de aqui hay que filtrar en DynamoDB (GSI por distrito / por banda de
-# precio) y que la tool consulte, en vez de volcar el catalogo entero al prompt.
-MAX_ITEMS = 180
-CUPO_DISTRITO = 14  # variedad: ningun distrito acapara el catalogo
-CUPO_PLATO = 14     # variedad: ni un plato tampoco
 
 # cuisine de OSM -> banda de precio + platos que ese local puede ofrecer.
 # "chinese" entra en chifa: en Lima el chifa se etiqueta de las dos formas.
@@ -50,6 +45,14 @@ BUCKETS = {
                ["suspiro de limena", "picarones", "mazamorra morada", "arroz zambito",
                 "turron de dona pepa", "ranfanote", "champus"]),
 }
+BANDA = {p: b for b, (_, ps) in BUCKETS.items() for p in ps}
+
+# INFERENCIA, no dato de OSM: un amenity=restaurant sin tag cuisine en Lima
+# casi siempre es un menu criollo. A esos les colgamos esta carta comun y los
+# marcamos cuisine_fuente="inferido". Los cafe y fast_food sin cuisine se
+# descartan: no hay base para adivinar que sirven.
+GENERICOS = ["lomo saltado", "aji de gallina", "arroz chaufa", "pollo a la brasa",
+             "causa a la limena", "papa a la huancaina", "arroz con pollo", "tacutacu"]
 
 # Banda base en soles por tipo de plato: punto medio de los rangos de carta que se
 # ven en Lima (cevicheria 30-45, menu criollo 18-30, 1/4 de pollo 18-26, plato
@@ -70,6 +73,10 @@ MULT = {
     "El Agustino": 0.75,
 }
 
+# Palabras que encabezan un ingrediente sin decir nada ("trozos de res"): con
+# estas el tag discriminante es la ultima palabra, no la primera.
+RELLENO = {"trozos", "abundante", "salsa", "bistec", "carne", "harina", "miel"}
+
 
 def precio(banda, distrito):
     """Estimacion determinista en soles. Ver BASE y MULT para el origen de cada numero."""
@@ -79,6 +86,11 @@ def precio(banda, distrito):
 def limpio(s):
     """Sin tildes ni enie: el repo entero es asi."""
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+
+def clave(s):
+    """kebab-case sin tildes: 'Aji de gallina' -> 'aji-de-gallina'."""
+    return re.sub(r"[^a-z0-9]+", "-", limpio(s).lower()).strip("-")
 
 
 def en_poligono(lng, lat, segs):
@@ -92,7 +104,7 @@ def en_poligono(lng, lat, segs):
 
 
 def platos(wikitext):
-    """{clave sin tildes: (nombre, [tags])} de las tablas Nombre|Tipo|Ingredientes|Imagen."""
+    """{clave sin tildes: (nombre, tipo, [tags])} de las tablas Nombre|Tipo|Ingredientes|Imagen."""
     out = {}
     for bloque in wikitext.split("|-"):
         celdas = [l[1:].strip() for l in bloque.splitlines()
@@ -100,14 +112,18 @@ def platos(wikitext):
         if len(celdas) < 3:
             continue
         nombre = re.sub(r"\[\[([^\]|]*\|)?([^\]]*)\]\]", r"\2", celdas[0]).replace("'''", "").strip()
-        tipo = re.sub(r"\(.*?\)", "", celdas[1])
-        tags = [limpio(t.strip().lower()) for t in tipo.split("/") if t.strip()]
-        # de los ingredientes solo los trozos cortos: los largos son prosa, no ingredientes
-        for ing in celdas[2].split(",")[:6]:
-            ing = limpio(re.sub(r"\(.*?\)|\[|\]", "", ing).strip(" .").lower())
-            if ing and len(ing.split()) <= 3 and len(tags) < 6:
-                tags.append(ing)
-        out.setdefault(limpio(nombre).lower(), (limpio(nombre), tags))
+        tipo = limpio(re.sub(r"\(.*?\)", "", celdas[1]).split("/")[0]).strip().capitalize()
+        # tags = el sustantivo cabeza de cada ingrediente ("pescado fresco crudo" ->
+        # "pescado"). Pocos y discriminantes: los que sirven para matchear un antojo.
+        tags = ["caldoso"] if tipo.lower().startswith(("sopa", "caldo")) else []
+        for ing in re.sub(r"\(.*?\)|\[|\]", "", celdas[2]).split(",")[:6]:
+            palabras = limpio(ing).strip(" .").lower().split()
+            if not palabras or len(palabras) > 3:
+                continue  # los trozos largos son prosa, no ingredientes
+            t = palabras[-1] if palabras[0] in RELLENO else palabras[0]
+            if len(t) > 2 and t not in tags:
+                tags.append(t)
+        out.setdefault(limpio(nombre).lower(), (limpio(nombre), tipo, tags[:4]))
     return out
 
 
@@ -121,6 +137,13 @@ def get(url, data=None):
         except Exception as e:
             err = e
     raise SystemExit(f"fuente caida tras 2 intentos: {url}: {err}")
+
+
+def escribe(nombre, items):
+    p = pathlib.Path(__file__).with_name(nombre)
+    # un objeto por linea: seed.py lo carga en streaming, sin meterlo todo en memoria
+    p.write_text("[\n" + ",\n".join(json.dumps(d, ensure_ascii=False) for d in items) + "\n]\n")
+    return p
 
 
 def main():
@@ -146,57 +169,53 @@ def main():
         ciudad = limpio(tags.get("addr:city", "")).lower()
         return next((n for n in nombres if n.lower() == ciudad), None)
 
-    # locales candidatos: los que tienen una cuisine que sabemos mapear
-    cands = []
-    for e in elems:
+    pares, usados = [], {}
+    for e in sorted(elems, key=lambda e: (e.get("type", ""), e.get("id", 0))):
         t = e.get("tags", {})
         if t.get("amenity") not in ("restaurant", "fast_food", "cafe"):
             continue
-        cocinas = t.get("cuisine", "").lower().split(";")
-        banda = next((b for b, (cs, _) in BUCKETS.items() if set(cs) & set(cocinas)), None)
-        if not banda and t["amenity"] == "cafe":
-            banda = "postre"
-        if not banda:
+        cocinas = set(t.get("cuisine", "").lower().split(";"))
+        banda = next((b for b, (cs, _) in BUCKETS.items() if cocinas & set(cs)), None)
+        if banda:
+            menu, fuente = BUCKETS[banda][1], "osm"
+        elif t["amenity"] == "restaurant":
+            menu, fuente = GENERICOS, "inferido"
+        else:
             continue
         c = e.get("center", e)
-        meta = sum(k in t for k in ("website", "phone", "opening_hours"))
-        cands.append((-meta, e["type"], e["id"], banda, t, c["lat"], c["lon"]))
-
-    # mas metadata primero (id como desempate para que la salida sea reproducible)
-    cands.sort()
-    items, por_distrito, por_plato, i = [], {}, {}, 0
-    for meta, tipo, oid, banda, t, lat, lng in cands:
-        if len(items) >= MAX_ITEMS:
-            break
+        lat, lng = c["lat"], c["lon"]
         distrito = distrito_de(lng, lat, t)
-        if not distrito or por_distrito.get(distrito, 0) >= CUPO_DISTRITO:
+        if not distrito:
             continue
-        menu = BUCKETS[banda][1]
-        cuantos = min(3, 1 - meta)  # meta viene negado del sort: mas metadata, mas platos (1-3)
-        elegidos = [p for p in menu[i % len(menu):] + menu[:i % len(menu)]
-                    if p in catalogo and por_plato.get(p, 0) < CUPO_PLATO][:min(cuantos, MAX_ITEMS - len(items))]
-        for p in elegidos:
-            nombre, tags = catalogo[p]
-            i += 1
-            items.append({
-                "id": f"{re.sub(r'[^a-z0-9]+', '-', p)}-{i:03d}",
+        osm_id = f"{e['type']}/{e['id']}"
+        for p in menu:
+            if p not in catalogo:
+                continue
+            nombre, tipo, tags = catalogo[p]
+            tags = list(dict.fromkeys([BANDA[p]] + tags))  # la banda primero, sin repetir
+            usados[clave(p)] = {"id": clave(p), "nombre": nombre, "tipo": tipo, "tags": tags}
+            pares.append({
+                "plato": clave(p),
+                "local": f"{distrito}#{osm_id}",
                 "nombre": nombre,
-                "precio": float(precio(banda, distrito)),
-                "distrito": distrito,
                 "lugar": limpio(t["name"]),
+                "distrito": distrito,
+                "precio": float(precio(BANDA[p], distrito)),
                 "lat": round(lat, 6),
                 "lng": round(lng, 6),
-                "tags": tags + [banda],
+                "tags": tags,
+                "osm_id": osm_id,
                 "precio_estimado": True,
-                "osm_id": f"{tipo}/{oid}",
-                "fuente": "OpenStreetMap (local) + Wikipedia (plato)",
+                "cuisine_fuente": fuente,
             })
-            por_distrito[distrito] = por_distrito.get(distrito, 0) + 1
-            por_plato[p] = por_plato.get(p, 0) + 1
 
-    salida = pathlib.Path(__file__).with_name("dishes.json")
-    salida.write_text("[\n" + ",\n".join(json.dumps(d, ensure_ascii=False) for d in items) + "\n]\n")
-    print(f"{len(items)} platos | {len(por_distrito)} distritos | {len(por_plato)} platos distintos")
+    a = escribe("platos.json", sorted(usados.values(), key=lambda d: d["id"]))
+    b = escribe("locales.json", pares)
+    inferidos = sum(1 for p in pares if p["cuisine_fuente"] == "inferido")
+    print(f"{len(usados)} platos ({a.stat().st_size // 1024} KB) | {len(pares)} pares "
+          f"({b.stat().st_size // 1024} KB) | {len({p['osm_id'] for p in pares})} locales | "
+          f"{len({p['distrito'] for p in pares})} distritos | "
+          f"osm {len(pares) - inferidos} / inferido {inferidos}")
 
 
 if __name__ == "__main__":
