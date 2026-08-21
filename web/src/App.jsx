@@ -12,6 +12,12 @@ const ESPERA = [
   'Ya casi: quedándonos con los tres mejores…',
 ]
 
+// sol = "pasar a claro", luna = "pasar a oscuro"; heredan el color del boton
+const ICONO = {
+  dark: <><circle cx="12" cy="12" r="4.6" /><path d="M12 1.8v2.6M12 19.6v2.6M4.8 4.8l1.9 1.9M17.3 17.3l1.9 1.9M1.8 12h2.6M19.6 12h2.6M4.8 19.2l1.9-1.9M17.3 6.7l1.9-1.9" /></>,
+  light: <path d="M20.5 14.6A8.6 8.6 0 1 1 9.4 3.5a6.9 6.9 0 0 0 11.1 11.1Z" />,
+}
+
 const resumen = (craving, platos) =>
   `${platos.length} platos para “${craving}”. El primero: ${platos[0].nombre}, ` +
   `${soles(platos[0].precio)}${platos[0].distrito ? ', en ' + platos[0].distrito : ''}.`
@@ -21,6 +27,17 @@ export default function App() {
   const [estado, setEstado] = useState('')   // string = informativo, objeto {title,detail} = error
   const [platos, setPlatos] = useState([])
   const [heading, setHeading] = useState(null)
+
+  // el script de index.html ya dejo en <html> lo que el usuario eligio antes;
+  // si nunca eligio, arrancamos con lo que diga el sistema
+  const [tema, setTema] = useState(() =>
+    document.documentElement.dataset.theme ||
+    (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = tema
+    try { localStorage.setItem('cravemap-tema', tema) } catch { /* modo privado: da igual */ }
+  }, [tema])
 
   // mensajes de espera rotativos mientras dura la consulta
   useEffect(() => {
@@ -62,6 +79,17 @@ export default function App() {
   return (
     <div className="wrap">
       <header>
+        <button
+          type="button" className="tema"
+          aria-pressed={tema === 'dark'}
+          aria-label={tema === 'dark' ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro'}
+          onClick={() => setTema(tema === 'dark' ? 'light' : 'dark')}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"
+               strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+            {ICONO[tema]}
+          </svg>
+        </button>
         <span className="badge">Lima · Perú</span>
         <h1>Crave<em>Map</em></h1>
         <p className="tagline">

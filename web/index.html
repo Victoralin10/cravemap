@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CraveMap — la brújula de antojos de Lima</title>
 <meta name="description" content="Describe tu antojo y la Craving Compass te apunta a 3 platos concretos cerca de ti en Lima.">
+<script>
+  // el tema antes del primer paint: sin esto la pagina parpadea en claro antes de que monte React
+  try{var t=localStorage.getItem('cravemap-tema');if(t)document.documentElement.dataset.theme=t}catch(e){}
+</script>
 </head>
 <body>
 <div id="root"></div>
